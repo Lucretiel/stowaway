@@ -142,6 +142,20 @@ use std::ptr;
 /// of a raw pointer.
 ///
 /// See the [module level documentation][crate] for more information.
+///
+/// # Example
+///
+/// ```
+/// use stowaway::Stowaway;
+///
+/// let value1: usize = 256;
+/// let value1_stowed = Stowaway::new(value1);
+/// let storage: *mut() = Stowaway::into_raw(value1_stowed);
+/// let value2_stowed = unsafe { Stowaway::from_raw(storage) };
+/// let value2: usize = Stowaway::into_inner(value2_stowed);
+///
+/// assert_eq!(value1, value2);
+/// ```
 // TODO: Find a way to test that this actually does what it claims; that is,
 // that it boxes large values and copies small ones.
 #[repr(transparent)]
@@ -170,20 +184,6 @@ impl<T> Stowaway<T> {
     /// stored directly in the struct; otherwise, it will be boxed and the
     /// `Box` will be stored in the struct. See the
     /// [module level documentation][crate] for more information.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use stowaway::Stowaway;
-    ///
-    /// let value1: usize = 256;
-    /// let value1_stowed = Stowaway::new(value1);
-    /// let storage: *mut() = Stowaway::into_raw(value1_stowed);
-    /// let value2_stowed = unsafe { Stowaway::from_raw(storage) };
-    /// let value2: usize = Stowaway::into_inner(value2_stowed);
-    ///
-    /// assert_eq!(value1, value2);
-    /// ```
     #[inline]
     pub fn new(value: T) -> Self {
         let storage = if Self::using_raw() {

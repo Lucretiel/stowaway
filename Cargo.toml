@@ -3,7 +3,15 @@ name = "stowaway"
 version = "0.1.0"
 authors = ["Nathan West <Lucretiel@gmail.com>"]
 edition = "2018"
+readme = "README.md"
+license = "MPL-2.0"
+description = "A library for packing data into a pointer, if it fits, or boxing it otherwise"
+repository = "https://github.com/Lucretiel/stowaway"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+
+[badges]
+travis-ci = { repository = "Lucretiel/joinery" }
+maintenance = { status = "actively-developed" }

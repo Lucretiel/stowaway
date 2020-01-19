@@ -586,6 +586,15 @@ pub unsafe fn unstow<T>(storage: *mut ()) -> T {
 /// references with the same `storage`, though take care to respect `Sync` in
 /// threaded applications.
 ///
+/// # Interior mutability
+///
+/// Many C-like APIs will provide copies of the `void*` context pointer to
+/// their functions. While constructing shared references with these copies is
+/// sound, keep in mind that changes made (for example, through a Cell) may
+/// not be reflected in other references unless the underlying API propogates
+/// them. In general you should use a `Box` rather than a `Stowaway` if you
+/// need shared mutablility through a pointer like this.
+///
 /// # Safety
 ///
 /// This function has similar safety requirements as turning a pointer into

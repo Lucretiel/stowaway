@@ -10,10 +10,6 @@
 //! value can then be passed as the context pointer for C-like interfaces,
 //! and then converted back into a [`Stowaway`] on the other end.
 //!
-//! This library also includes the shortcut functions [`stow`] and [`unstow`],
-//! for direct conversion between a `T` and a `*const ()`. These functions
-//! just use the relevant `Stowaway` methods.
-//!
 //! # Lifecycle
 //!
 //! The basic lifecycle of a [`Stowaway`] value is as follows:
@@ -44,7 +40,7 @@
 //!     let new_stowed: Stowaway<T> = unsafe { Stowaway::from_raw(storage) };
 //!     let unstowed: T = Stowaway::into_inner(new_stowed);
 //!
-//!     //assert_eq!(unstowed, cloned);
+//!     assert_eq!(unstowed, cloned);
 //! }
 //!
 //! // A small value, like a u16, is stored directly in the pointer. No
@@ -108,7 +104,7 @@
 //! event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(10u16)));
 //! event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(20u16)));
 //!
-//! // Event 2: Print a large array ([u64; 8]. This won't definitely won't fit
+//! // Event 2: Print a large array (`[u64; 8]`). This won't definitely won't fit
 //! // in a pointer, so stowaway will automatically allocate it for us
 //! fn print_big_array(value:  *mut()) {
 //!     unsafe {
@@ -142,12 +138,13 @@ use std::ops::{Deref, DerefMut};
 use std::ptr;
 
 /// A maybe-allocated container. This struct stores a single `T` value, either
-/// by boxing it or (if T is small enough) by packing it directly into the bytes
+/// by boxing it or (if `T` is small enough) by packing it directly into the bytes
 /// of a raw pointer.
 ///
-/// See the module level documentation for more information.
+/// See the [module level documentation][crate] for more information.
 // TODO: Find a way to test that this actually does what it claims; that is,
 // that it boxes large values and copies small ones.
+#[repr(transparent)]
 pub struct Stowaway<T> {
     // TODO: Reimplemnt this as union, once we can have non-copy fields in a
     // union.
@@ -171,8 +168,8 @@ impl<T> Stowaway<T> {
 
     /// Create a new `Stowaway`. If `T` can fit into a pointer, it will be
     /// stored directly in the struct; otherwise, it will be boxed and the
-    /// `Box` will be stored in the struct. See the module level documentation
-    /// for more information.
+    /// `Box` will be stored in the struct. See the
+    /// [module level documentation][crate] for more information.
     ///
     /// # Example
     ///
@@ -214,8 +211,7 @@ impl<T> Stowaway<T> {
                 blob.assume_init()
             }
         } else {
-            let boxed = Box::new(value);
-            Box::into_raw(boxed)
+            Box::into_raw(Box::new(value))
         };
 
         Self { storage }
@@ -238,6 +234,8 @@ impl<T> Stowaway<T> {
     /// - This particular `storage` value **must not** be used to create
     ///   any additional `Stowaway` values. Note that this applies even for
     ///   `Copy` types, because the value may have been boxed.
+    /// - You must take care to not recreate a [`Stowaway`] across a thread
+    ///   boundary for non-`Send` types.
     #[inline]
     pub unsafe fn from_raw(storage: *mut ()) -> Self {
         Self {
@@ -248,6 +246,9 @@ impl<T> Stowaway<T> {
     /// Unwrap this [`Stowaway`] and get the underlying value.
     #[inline]
     pub fn into_inner(stowed: Self) -> T {
+        let storage = stowed.storage;
+        mem::forget(stowed);
+
         if Self::using_raw() {
             // This can all be done with transmute_copy, but:
             // - I prefer to make sure the right casts are happening (
@@ -255,13 +256,6 @@ impl<T> Stowaway<T> {
             // - transmute_copy uses an unaligned read, which we don't need
             // - I prefer to pair read/write calls, as opposed to using
             //   `write` in `new` but `transmute` here.
-
-            // Take the pointer our of self
-            let storage = stowed.storage;
-
-            // Don't run self's destructor
-            mem::forget(stowed);
-
             let ptr_to_storage: *const *mut T = &storage;
             let ptr_to_value: *const T = ptr_to_storage as *const T;
 
@@ -273,7 +267,7 @@ impl<T> Stowaway<T> {
         } else {
             // Safety: this *mut T value was created from Box::into_raw.
             // Therefore we can wrap it back up in a box.
-            let boxed = unsafe { Box::from_raw(stowed.storage) };
+            let boxed = unsafe { Box::from_raw(storage) };
             *boxed
         }
     }
@@ -309,12 +303,12 @@ impl<T> Drop for Stowaway<T> {
             // Safety:
             //
             // - This value was previously placed in storage by a call to `new`
-            // - We're about to drop self, so there's no risk of a double-free
             let _value = unsafe { ptr::read(ptr_to_value) };
         } else {
+            // Safety:
+            //
+            // - This box was previously placed in storage by a call to new`
             let _box = unsafe { Box::from_raw(self.storage) };
-
-            panic!("OOOOPS");
         }
     }
 }
@@ -385,7 +379,6 @@ mod test_drop {
     }
 
     #[test]
-    #[ignore]
     fn large_stowed_value() {
         let counter: Cell<u32> = Cell::new(0);
 
@@ -417,11 +410,11 @@ mod test_drop {
         let storage = Stowaway::into_raw(stowed_value);
         assert_eq!(counter.get(), 0);
 
-        let stowed_value = unsafe { Stowaway::<[DropCounter; 32]>::from_raw(storage) };
+        let stowed_value = unsafe { Stowaway::<[DropCounter; 16]>::from_raw(storage) };
         assert_eq!(counter.get(), 0);
 
         mem::drop(stowed_value);
-        assert_eq!(counter.get(), 32);
+        assert_eq!(counter.get(), 16);
     }
 
     #[test]
@@ -456,14 +449,14 @@ mod test_drop {
         let storage = Stowaway::into_raw(stowed_value);
         assert_eq!(counter.get(), 0);
 
-        let stowed_value = unsafe { Stowaway::<[DropCounter; 32]>::from_raw(storage) };
+        let stowed_value = unsafe { Stowaway::<[DropCounter; 16]>::from_raw(storage) };
         assert_eq!(counter.get(), 0);
 
-        let raw_value: [DropCounter; 32] = Stowaway::into_inner(stowed_value);
+        let raw_value: [DropCounter; 16] = Stowaway::into_inner(stowed_value);
         assert_eq!(counter.get(), 0);
 
         mem::drop(raw_value);
-        assert_eq!(counter.get(), 1);
+        assert_eq!(counter.get(), 16);
     }
 }
 
@@ -483,7 +476,7 @@ impl<T> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
         if Self::using_raw() {
-            unsafe { mem::transmute(&self.storage) }
+            unsafe { &*(&self.storage as *const *mut T as *const T) }
         } else {
             // In the box case, storage IS a valid pointer, so we simply
             // dereference it
@@ -496,7 +489,7 @@ impl<T> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         if Self::using_raw() {
-            unsafe { mem::transmute(&mut self.storage) }
+            unsafe { &mut *(&mut self.storage as *mut *mut T as *mut T) }
         } else {
             // In the box case, storage IS a valid pointer, so we simply
             // dereference it
@@ -548,9 +541,9 @@ unsafe impl<T: Sync> Sync for Stowaway<T> {}
 /// Stow a value into a `*mut ()`. This function will store the value's bytes
 /// directly into the pointer if it will fit; otherwise it will box the value
 /// and return the raw pointer. The value can be unstowed with a call to
-/// [`unstow`].
+/// [`unstow`], or converted into a [`Stowaway`] with [`Stowaway::from_raw`]
 ///
-/// See the module level documentation for more information.
+/// This is the equivalent of `Stowaway::into_raw(Stowaway::new(value))`
 #[inline]
 pub fn stow<T>(value: T) -> *mut () {
     Stowaway::into_raw(Stowaway::new(value))
@@ -565,9 +558,11 @@ pub fn stow<T>(value: T) -> *mut () {
 /// suffice– consider using [`Stowaway::from_raw`] instead, as that will omit
 /// the extra copy out of the box if the value is boxed.
 ///
+/// This is the equivalent of `Stowaway::into_inner(Stowaway::from_raw(storage))`
+///
 /// # Safety
 ///
-/// This function has similar safety requirements as [`std::ptr::read`],
+/// This function has similar safety requirements as [`std::ptr::read`]
 /// and [`Box::from_raw`] with the added caveat that the only valid way to
 /// create a `storage` pointer is with the [`stow`] or [`Stowaway::into_raw`]
 /// functions:
@@ -576,7 +571,159 @@ pub fn stow<T>(value: T) -> *mut () {
 /// [`Stowaway::into_raw`] call for a value of exactly the same `T`.
 /// - This particular `storage` value **must not** be restored again. Note that
 /// this applies even for `Copy` types, because the value may have been boxed.
+/// - This function does not respect marker traits; you must take care not to
+/// pass a non-`Send` type to a different thread.
 #[inline]
 pub unsafe fn unstow<T>(storage: *mut ()) -> T {
     Stowaway::into_inner(Stowaway::from_raw(storage))
+}
+
+/// Get a reference to a value that was previously stowed, either with [`stow`]
+/// or with [`Stowaway::into_raw`]. This function does *not* take ownership
+/// of the value in `storage`, but it does create a shared reference to it, so
+/// you must take care to not separately take ownership of it somewhere else,
+/// or create a mutable reference to it. It is safe to create multiple shared
+/// references with the same `storage`, though take care to respect `Sync` in
+/// threaded applications.
+///
+/// # Safety
+///
+/// This function has similar safety requirements as turning a pointer into
+/// a reference.
+///
+/// - The `storage` value **must** have come from a previous [`stow`] or
+/// [`Stowaway::into_raw`] call for a value of exactly the same `T`.
+/// - You **must** not unstow the value or create a mutable reference to it
+/// while this or any other shared reference to it exist.
+/// - This function does not respect marker traits; you must take care not
+/// to create a shared reference to a non-`Sync` type across a thread boundary.
+///
+/// # Example
+///
+/// ```
+/// use stowaway::{ref_from_stowed, stow, unstow};
+///
+/// let value: i16 = 143;
+/// let mut storage = stow(value);
+/// {
+///     let value_ref_1: &i16 = unsafe { ref_from_stowed(&storage) };
+///     let value_ref_2: &i16 = unsafe { ref_from_stowed(&storage) };
+///     assert_eq!(value_ref_1, &143);
+///     assert_eq!(value_ref_2, &143);
+/// }
+///
+/// // Need to make sure we drop the value;
+/// let value: i16 = unsafe { unstow(storage) };
+/// ```
+#[inline]
+pub unsafe fn ref_from_stowed<'a, T>(storage_ref: &'a *mut ()) -> &'a T {
+    // Safety: because we use repr(transparent), this is a safe conversion
+    let stowaway_ref: &'a Stowaway<T> = &*(storage_ref as *const *mut () as *const Stowaway<T>);
+    stowaway_ref.as_ref()
+}
+
+#[test]
+fn test_ref_from_stowed_small() {
+    let value: u16 = 173;
+    let storage = stow(value);
+
+    {
+        let value_ref_1: &u16 = unsafe { ref_from_stowed(&storage) };
+        let value_ref_2: &u16 = unsafe { ref_from_stowed(&storage) };
+
+        assert_eq!(*value_ref_1, 173);
+        assert_eq!(*value_ref_2, 173);
+    }
+
+    // drop stowed
+    let _stowed: Stowaway<u16> = unsafe { Stowaway::from_raw(storage) };
+}
+
+#[test]
+fn test_ref_from_stowed_large() {
+    let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
+    let storage = stow(value);
+
+    {
+        let value_ref_1: &Vec<i64> = unsafe { ref_from_stowed(&storage) };
+        let value_ref_2: &Vec<i64> = unsafe { ref_from_stowed(&storage) };
+
+        assert_eq!(value_ref_1[3], 1234);
+        assert_eq!(value_ref_2[1], 5675);
+    }
+
+    // drop stowed
+    let _stowed: Stowaway<Vec<i64>> = unsafe { Stowaway::from_raw(storage) };
+}
+
+/// Get a mutable reference to a value that was previously stowed, either with
+/// [`stow`] or with [`Stowaway::into_raw`]. This function does *not* take
+/// ownership of the value in `storage`, but it does create a mutable reference
+/// to it, so you must take care to not separately take ownership of it
+/// somewhere else, or create any other shared or mutable references to it.
+///
+/// # Safety
+///
+/// This function has similar safety requirements as turning a mutable pointer
+/// into a mutable reference.
+///
+/// - The `storage` value **must** have come from a previous [`stow`] or
+/// [`Stowaway::into_raw`] call for a value of exactly the same `T`.
+/// - You **must** not unstow the value or create any other mutable or shared
+/// references to it while this mutable reference exists.
+/// - This function does not respect marker traits; you must take care not
+/// to create a mutable reference across a thread boundary unless
+/// `&mut T: Send`.
+///
+/// # Example
+///
+/// ```
+/// use stowaway::{mut_ref_from_stowed, stow, unstow};
+///
+/// let value: Vec<i64> = vec![1, 2, 3, 4];
+/// let mut storage = stow(value);
+/// {
+///     let value_ref: &mut Vec<i64> = unsafe { mut_ref_from_stowed(&mut storage) };
+///     value_ref.push(5);
+///     value_ref.push(6);
+/// }
+/// let value: Vec<i64> = unsafe { unstow(storage) };
+/// assert_eq!(&value, &[1, 2, 3, 4, 5, 6]);
+/// ```
+#[inline]
+pub unsafe fn mut_ref_from_stowed<'a, T>(storage_ref: &'a mut *mut ()) -> &'a mut T {
+    // Safety: because we use repr(transparent), this is a safe conversion
+    let stowaway_ref: &'a mut Stowaway<T> = &mut *(storage_ref as *mut *mut () as *mut Stowaway<T>);
+    stowaway_ref.as_mut()
+}
+
+#[test]
+fn test_mut_ref_from_stowed_small() {
+    let value: u16 = 173;
+    let mut storage = stow(value);
+
+    {
+        let value_ref: &mut u16 = unsafe { mut_ref_from_stowed(&mut storage) };
+        *value_ref += 55;
+    }
+
+    // drop stowed
+    let value: u16 = unsafe { unstow(storage) };
+    assert_eq!(value, 228);
+}
+
+#[test]
+fn test_mut_ref_from_stowed_large() {
+    let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
+    let mut storage = stow(value);
+
+    {
+        let value_ref: &mut Vec<i64> = unsafe { mut_ref_from_stowed(&mut storage) };
+        value_ref.push(10);
+        value_ref.push(12);
+    }
+
+    // drop stowed
+    let value: Vec<i64> = unsafe { unstow(storage) };
+    assert_eq!(&value, &[3245, 5675, 4653, 1234, 7345, 10, 12]);
 }

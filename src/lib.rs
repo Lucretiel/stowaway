@@ -8,7 +8,7 @@
 //! The central feature of this library is value packing in a [`Stowaway`]
 //! struct. If `T` is not larger than a pointer (that is, if
 //! `sizeof(T) <= sizeof(*T))`, then the value is packed directly into the
-//! bytes of an opaque pointer value (specifically, a `*const ()`). This
+//! bytes of an opaque pointer value (specifically, a `*mut ()`). This
 //! value can then be passed as the context pointer for C-like interfaces,
 //! and then converted back into a [`Stowaway`] on the other end.
 //!

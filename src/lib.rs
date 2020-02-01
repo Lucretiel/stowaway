@@ -1,3 +1,5 @@
+#![no_std]
+
 //! Stowaway is a library for efficiently storing values in a pointer. The
 //! main use case for stowaway is as a helpful way to interoperate with
 //! libraries that require opaque data to be passed via pointer, such as C
@@ -132,10 +134,13 @@
 //! }
 //! ```
 
-use std::fmt;
-use std::mem::{self, size_of, MaybeUninit};
-use std::ops::{Deref, DerefMut};
-use std::ptr;
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::fmt;
+use core::mem::{self, size_of, MaybeUninit};
+use core::ops::{Deref, DerefMut};
+use core::ptr;
 
 /// A maybe-allocated container. This struct stores a single `T` value, either
 /// by boxing it or (if `T` is small enough) by packing it directly into the bytes
@@ -316,8 +321,8 @@ impl<T> Drop for Stowaway<T> {
 #[cfg(test)]
 mod test_drop {
     use crate::Stowaway;
-    use std::cell::Cell;
-    use std::mem;
+    use core::cell::Cell;
+    use core::mem;
 
     struct DropCounter<'a> {
         counter: &'a Cell<u32>,
@@ -650,6 +655,9 @@ fn test_ref_from_stowed_small() {
 
 #[test]
 fn test_ref_from_stowed_large() {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
     let storage = stow(value);
 
@@ -723,6 +731,9 @@ fn test_mut_ref_from_stowed_small() {
 
 #[test]
 fn test_mut_ref_from_stowed_large() {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
     let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
     let mut storage = stow(value);
 

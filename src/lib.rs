@@ -142,6 +142,13 @@ use core::mem::{self, size_of, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum SizeClass {
+    Zero,
+    Packed,
+    Boxed,
+}
+
 /// A maybe-allocated container. This struct stores a single `T` value, either
 /// by boxing it or (if `T` is small enough) by packing it directly into the bytes
 /// of a raw pointer.
@@ -176,13 +183,25 @@ impl<T> Stowaway<T> {
     ///
     /// TODO: make this a const fn when && is allowed in const
     #[inline(always)]
-    fn using_raw() -> bool {
-        mem::size_of::<T>() <= mem::size_of::<*mut T>()
+    fn size_class() -> SizeClass {
+        assert_eq!(
+            mem::size_of::<*mut T>(),
+            mem::size_of::<*mut ()>(),
+            "Cannot currently stow pointers to DSTs"
+        );
 
-        // Need to check alignment, just in case. However, in order for this
-        // to fail, we'd need a T value with an alignment larger than its own
-        // size.
+        if mem::size_of::<T>() == 0 {
+            SizeClass::Zero
+        } else if mem::size_of::<T>() <= mem::size_of::<*mut T>()
+            // Need to check alignment, just in case. However, in order for this
+            // to fail, we'd need a T value with an alignment larger than its own
+            // size.
             && mem::align_of::<T>() <= mem::align_of::<*mut T>()
+        {
+            SizeClass::Packed
+        } else {
+            SizeClass::Boxed
+        }
     }
 
     /// Create a new `Stowaway`. If `T` can fit into a pointer, it will be
@@ -191,32 +210,34 @@ impl<T> Stowaway<T> {
     /// [module level documentation][crate] for more information.
     #[inline]
     pub fn new(value: T) -> Self {
-        let storage = if Self::using_raw() {
-            // If T smaller than *mut T, we need to initialize the extra
-            // bytes. TODO: figure out a way to initialize these bytes (to
-            // the satisfaction of defined behavior) without zeroing them,
-            // if possible.
-            let mut blob: MaybeUninit<*mut T> = if size_of::<T>() < size_of::<*mut T>() {
-                MaybeUninit::zeroed()
-            } else {
-                MaybeUninit::uninit()
-            };
+        let storage = match Self::size_class() {
+            SizeClass::Zero => ptr::null_mut(),
+            SizeClass::Boxed => Box::into_raw(Box::new(value)),
+            SizeClass::Packed => {
+                // If T smaller than *mut T, we need to initialize the extra
+                // bytes. TODO: figure out a way to initialize these bytes (to
+                // the satisfaction of defined behavior) without zeroing them,
+                // if possible.
+                let mut blob: MaybeUninit<*mut T> = if size_of::<T>() < size_of::<*mut T>() {
+                    MaybeUninit::zeroed()
+                } else {
+                    MaybeUninit::uninit()
+                };
 
-            let ptr = blob.as_mut_ptr();
+                let ptr = blob.as_mut_ptr();
 
-            unsafe {
-                // Safety: We know that the underlying bytes are unused, and
-                // that there are enough of them, and that blob takes ownership
-                // of value. This write call is paired with a `read` call in
-                // `into_inner`.
-                ptr::write(ptr as *mut T, value);
+                unsafe {
+                    // Safety: We know that the underlying bytes are unused, and
+                    // that there are enough of them, and that blob takes ownership
+                    // of value. This write call is paired with a `read` call in
+                    // `into_inner`.
+                    ptr::write(ptr as *mut T, value);
 
-                // Safety: all the bytes of blob were initialized, either
-                // as zero or with `value`
-                blob.assume_init()
+                    // Safety: all the bytes of blob were initialized, either
+                    // as zero or with `value`
+                    blob.assume_init()
+                }
             }
-        } else {
-            Box::into_raw(Box::new(value))
         };
 
         Self { storage }
@@ -254,26 +275,27 @@ impl<T> Stowaway<T> {
         let storage = stowed.storage;
         mem::forget(stowed);
 
-        if Self::using_raw() {
-            // This can all be done with transmute_copy, but:
-            // - I prefer to make sure the right casts are happening (
-            //   T vs *T vs **T)
-            // - transmute_copy uses an unaligned read, which we don't need
-            // - I prefer to pair read/write calls, as opposed to using
-            //   `write` in `new` but `transmute` here.
-            let ptr_to_storage: *const *mut T = &storage;
-            let ptr_to_value: *const T = ptr_to_storage as *const T;
+        match Self::size_class() {
+            // Safety: ptr::read is guaranteed to be a no-op for a ZST
+            SizeClass::Zero => unsafe { ptr::read(storage) },
+            // Safety: we previously created a box in `new`
+            SizeClass::Boxed => *unsafe { Box::from_raw(storage) },
+            SizeClass::Packed => {
+                // This can all be done with transmute_copy, but:
+                // - I prefer to make sure the right casts are happening (
+                //   T vs *T vs **T)
+                // - transmute_copy uses an unaligned read, which we don't need
+                // - I prefer to pair read/write calls, as opposed to using
+                //   `write` in `new` but `transmute` here.
+                let ptr_to_storage: *const *mut T = &storage;
+                let ptr_to_value: *const T = ptr_to_storage as *const T;
 
-            // Safety:
-            //
-            // - This value was previously placed in storage by a call to `new`
-            // - It won't be double-freed, because we did a forget earlier.
-            unsafe { ptr::read(ptr_to_value) }
-        } else {
-            // Safety: this *mut T value was created from Box::into_raw.
-            // Therefore we can wrap it back up in a box.
-            let boxed = unsafe { Box::from_raw(storage) };
-            *boxed
+                // Safety:
+                //
+                // - This value was previously placed in storage by a call to `new`
+                // - It won't be double-freed, because we did a forget earlier.
+                unsafe { ptr::read(ptr_to_value) }
+            }
         }
     }
 
@@ -290,8 +312,6 @@ impl<T> Stowaway<T> {
     /// if `T` is `Copy`!).
     #[inline]
     pub fn into_raw(stowed: Self) -> *mut () {
-        assert_eq!(size_of::<*mut T>(), size_of::<*mut ()>());
-
         let storage = stowed.storage;
         mem::forget(stowed);
         storage as *mut ()
@@ -300,20 +320,22 @@ impl<T> Stowaway<T> {
 
 impl<T> Drop for Stowaway<T> {
     fn drop(&mut self) {
-        if Self::using_raw() {
-            let storage = self.storage;
-            let ptr_to_storage: *const *mut T = &storage;
-            let ptr_to_value: *const T = ptr_to_storage as *const T;
+        match Self::size_class() {
+            // Safety: this value was previously owned by Self::new, and
+            // ptr::read on a zero-size type is a no-op
+            SizeClass::Zero => drop(unsafe { ptr::read(self.storage) }),
+            // Safety: this box was previously created by Self::new
+            SizeClass::Boxed => drop(unsafe { Box::from_raw(self.storage) }),
+            SizeClass::Packed => {
+                let storage = self.storage;
+                let ptr_to_storage: *const *mut T = &storage;
+                let ptr_to_value: *const T = ptr_to_storage as *const T;
 
-            // Safety:
-            //
-            // - This value was previously placed in storage by a call to `new`
-            let _value = unsafe { ptr::read(ptr_to_value) };
-        } else {
-            // Safety:
-            //
-            // - This box was previously placed in storage by a call to new`
-            let _box = unsafe { Box::from_raw(self.storage) };
+                // Safety:
+                //
+                // - This value was previously placed in storage by a call to `new`
+                drop(unsafe { ptr::read(ptr_to_value) });
+            }
         }
     }
 }
@@ -480,26 +502,32 @@ impl<T> From<T> for Stowaway<T> {
 impl<T> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
-        if Self::using_raw() {
-            unsafe { &*(&self.storage as *const *mut T as *const T) }
-        } else {
-            // In the box case, storage IS a valid pointer, so we simply
+        let ptr_to_storage = match Self::size_class() {
+            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
+            SizeClass::Zero => self.storage,
+            // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            unsafe { &*self.storage }
-        }
+            SizeClass::Boxed => self.storage,
+            SizeClass::Packed => (&self.storage) as *const *mut T as *const T,
+        };
+
+        unsafe { &*ptr_to_storage }
     }
 }
 
 impl<T> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
-        if Self::using_raw() {
-            unsafe { &mut *(&mut self.storage as *mut *mut T as *mut T) }
-        } else {
-            // In the box case, storage IS a valid pointer, so we simply
+        let ptr_to_storage = match Self::size_class() {
+            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
+            SizeClass::Zero => self.storage,
+            // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            unsafe { &mut *self.storage }
-        }
+            SizeClass::Boxed => self.storage,
+            SizeClass::Packed => (&mut self.storage) as *mut *mut T as *mut T,
+        };
+
+        unsafe { &mut *ptr_to_storage }
     }
 }
 
@@ -535,7 +563,7 @@ impl<T: fmt::Debug> fmt::Debug for Stowaway<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Stowaway")
             .field("inner", self.as_ref())
-            .field("boxed", &!Self::using_raw())
+            .field("type", &Self::size_class())
             .finish()
     }
 }

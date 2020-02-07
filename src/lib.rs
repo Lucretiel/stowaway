@@ -217,15 +217,13 @@ impl<T> Stowaway<T> {
             }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
             SizeClass::Packed => {
-                // If T smaller than *mut T, we need to initialize the extra
-                // bytes. TODO: figure out a way to initialize these bytes (to
+                // T may contain uninit bytes, either by being smaller than
+                // the systems pointer width, or by containing fields which
+                // do not align.
+                // TODO: figure out a way to initialize these bytes (to
                 // the satisfaction of defined behavior) without zeroing them,
                 // if possible.
-                let mut blob: MaybeUninit<*mut T> = if size_of::<T>() < size_of::<*mut T>() {
-                    MaybeUninit::zeroed()
-                } else {
-                    MaybeUninit::uninit()
-                };
+                let mut blob: MaybeUninit<*mut T> = MaybeUninit::zeroed();
 
                 let ptr = blob.as_mut_ptr();
 

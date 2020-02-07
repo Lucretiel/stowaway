@@ -213,6 +213,7 @@ impl<T> Stowaway<T> {
         let storage = match Self::size_class() {
             SizeClass::Zero => {
                 mem::forget(value);
+                // Ptr must be correctly aligned, even for zero-sized types.
                 mem::align_of::<T>() as *mut T
             }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
@@ -277,7 +278,8 @@ impl<T> Stowaway<T> {
         mem::forget(stowed);
 
         match Self::size_class() {
-            // Safety: ptr::read is guaranteed to be a no-op for a ZST
+            // Safety: storage was created with correct alignment, as required
+            // even for zero-sized types.
             SizeClass::Zero => unsafe { ptr::read(storage) },
             // Safety: we previously created a box in `new`
             SizeClass::Boxed => *unsafe { Box::from_raw(storage) },

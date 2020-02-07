@@ -138,7 +138,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::fmt;
-use core::mem::{self, size_of, MaybeUninit};
+use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 
@@ -213,7 +213,7 @@ impl<T> Stowaway<T> {
         let storage = match Self::size_class() {
             SizeClass::Zero => {
                 mem::forget(value);
-                ptr::null_mut()
+                mem::align_of::<T>() as *mut T
             }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
             SizeClass::Packed => {

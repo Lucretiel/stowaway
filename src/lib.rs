@@ -211,7 +211,10 @@ impl<T> Stowaway<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         let storage = match Self::size_class() {
-            SizeClass::Zero => ptr::null_mut(),
+            SizeClass::Zero => {
+                mem::forget(value);
+                ptr::null_mut()
+            }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
             SizeClass::Packed => {
                 // If T smaller than *mut T, we need to initialize the extra
@@ -345,6 +348,7 @@ mod test_drop {
     use crate::Stowaway;
     use core::cell::Cell;
     use core::mem;
+    use core::sync::atomic::{AtomicU32, Ordering};
 
     struct DropCounter<'a> {
         counter: &'a Cell<u32>,
@@ -356,7 +360,36 @@ mod test_drop {
         }
     }
 
-    // TODO: deduplicate these tests
+    #[test]
+    fn zero_size_value() {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+        #[derive(Debug)]
+        struct StaticDropCounter;
+
+        impl Drop for StaticDropCounter {
+            fn drop(&mut self) {
+                COUNTER.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        {
+            let value = StaticDropCounter;
+            assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+
+            let stowed_value = Stowaway::new(value);
+            assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+
+            let storage = Stowaway::into_raw(stowed_value);
+            assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+
+            let stowed_value = unsafe { Stowaway::<StaticDropCounter>::from_raw(storage) };
+            assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
+
+            mem::drop(stowed_value);
+            assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+        }
+    }
 
     #[test]
     fn small_stowed_value() {

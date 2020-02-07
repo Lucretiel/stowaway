@@ -325,7 +325,8 @@ impl<T> Drop for Stowaway<T> {
     fn drop(&mut self) {
         match Self::size_class() {
             // Safety: this value was previously owned by Self::new, and
-            // ptr::read on a zero-size type is a no-op
+            // storage was craeted with correct alignment as required by
+            // ptr::read even on zero-sized types.
             SizeClass::Zero => drop(unsafe { ptr::read(self.storage) }),
             // Safety: this box was previously created by Self::new
             SizeClass::Boxed => drop(unsafe { Box::from_raw(self.storage) }),
@@ -536,7 +537,8 @@ impl<T> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
         let ptr_to_storage = match Self::size_class() {
-            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
+            // Safety: Storage was created with correct alignment and
+            // therefore is also non-null.
             SizeClass::Zero => self.storage,
             // In the box case, storage IS a valid pointer, so simply
             // dereference it
@@ -552,7 +554,8 @@ impl<T> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         let ptr_to_storage = match Self::size_class() {
-            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
+            // Safety: Storage was created with correct alignment and
+            // therefore is also non-null.
             SizeClass::Zero => self.storage,
             // In the box case, storage IS a valid pointer, so simply
             // dereference it

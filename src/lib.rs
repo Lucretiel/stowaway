@@ -138,7 +138,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::fmt;
-use core::mem::{self, size_of, MaybeUninit};
+use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 

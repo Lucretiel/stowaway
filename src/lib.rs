@@ -320,6 +320,57 @@ impl<T> Stowaway<T> {
         storage as *mut ()
     }
 }
+// These tests should fail miri test
+#[cfg(test)]
+mod test_for_uninit_bytes {
+    use crate::{stow, unstow};
+    #[test]
+    fn zst() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Zst;
+        let x = Zst;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn small_t() {
+        let x: u8 = 7;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn t_with_gaps_32() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Gaps32 {
+            a: u8,
+            b: u16
+        }
+        let x = Gaps32 {
+            a: 7,
+            b: 42
+        };
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn t_with_gaps_64() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Gaps64 {
+            a: u8,
+            b: u32
+        }
+        let x = Gaps64 {
+            a: 7,
+            b: 42
+        };
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+}
 
 impl<T> Drop for Stowaway<T> {
     fn drop(&mut self) {

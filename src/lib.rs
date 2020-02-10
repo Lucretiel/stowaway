@@ -217,8 +217,8 @@ impl<T> Stowaway<T> {
             }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
             SizeClass::Packed => {
-                // If T smaller than *mut T, or contains uninit bytes inernally,
-                // we need to initialize the extra bytes. TODO: figure out a way
+                // Need to init (zero) all bytes. Even if sizeof(T) == sizeof(*T),
+                // T may contain unused/uninit padding bytes. TODO: figure out a way
                 // to initialize these bytes (to the satisfaction of defined
                 // behavior) without zeroing them, if possible.
                 let mut blob: MaybeUninit<*mut T> = MaybeUninit::zeroed();
@@ -316,7 +316,8 @@ impl<T> Stowaway<T> {
         storage as *mut ()
     }
 }
-// These tests should fail miri test
+// These tests are designed to detect undefined behavior in miri under naive,
+// incorrect implementations of Stowaway.
 #[cfg(test)]
 mod test_for_uninit_bytes {
     use crate::{stow, unstow};

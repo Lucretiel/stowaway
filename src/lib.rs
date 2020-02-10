@@ -345,12 +345,9 @@ mod test_for_uninit_bytes {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct Gaps32 {
             a: u8,
-            b: u16
+            b: u16,
         }
-        let x = Gaps32 {
-            a: 7,
-            b: 42
-        };
+        let x = Gaps32 { a: 7, b: 42 };
         let stowed = stow(x);
         let unstowed = unsafe { unstow(stowed) };
         assert_eq!(x, unstowed);
@@ -360,12 +357,9 @@ mod test_for_uninit_bytes {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct Gaps64 {
             a: u8,
-            b: u32
+            b: u32,
         }
-        let x = Gaps64 {
-            a: 7,
-            b: 42
-        };
+        let x = Gaps64 { a: 7, b: 42 };
         let stowed = stow(x);
         let unstowed = unsafe { unstow(stowed) };
         assert_eq!(x, unstowed);

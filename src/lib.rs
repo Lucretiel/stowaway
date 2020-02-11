@@ -138,7 +138,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::fmt;
-use core::mem::{self, size_of, MaybeUninit};
+use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 
@@ -217,15 +217,11 @@ impl<T> Stowaway<T> {
             }
             SizeClass::Boxed => Box::into_raw(Box::new(value)),
             SizeClass::Packed => {
-                // If T smaller than *mut T, we need to initialize the extra
-                // bytes. TODO: figure out a way to initialize these bytes (to
-                // the satisfaction of defined behavior) without zeroing them,
-                // if possible.
-                let mut blob: MaybeUninit<*mut T> = if size_of::<T>() < size_of::<*mut T>() {
-                    MaybeUninit::zeroed()
-                } else {
-                    MaybeUninit::uninit()
-                };
+                // Need to init (zero) all bytes. Even if sizeof(T) == sizeof(*T),
+                // T may contain unused/uninit padding bytes. TODO: figure out a way
+                // to initialize these bytes (to the satisfaction of defined
+                // behavior) without zeroing them, if possible.
+                let mut blob: MaybeUninit<*mut T> = MaybeUninit::zeroed();
 
                 let ptr = blob.as_mut_ptr();
 
@@ -318,6 +314,52 @@ impl<T> Stowaway<T> {
         let storage = stowed.storage;
         mem::forget(stowed);
         storage as *mut ()
+    }
+}
+// These tests are designed to detect undefined behavior in miri under naive,
+// incorrect implementations of Stowaway.
+#[cfg(test)]
+mod test_for_uninit_bytes {
+    use crate::{stow, unstow};
+    #[test]
+    fn zst() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Zst;
+        let x = Zst;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn small_t() {
+        let x: u8 = 7;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn t_with_gaps_32() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Gaps32 {
+            a: u8,
+            b: u16,
+        }
+        let x = Gaps32 { a: 7, b: 42 };
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+    #[test]
+    fn t_with_gaps_64() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Gaps64 {
+            a: u8,
+            b: u32,
+        }
+        let x = Gaps64 { a: 7, b: 42 };
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
     }
 }
 

@@ -149,6 +149,8 @@ enum SizeClass {
     Boxed,
 }
 
+use SizeClass::*;
+
 /// A maybe-allocated container. This struct stores a single `T` value, either
 /// by boxing it or (if `T` is small enough) by packing it directly into the bytes
 /// of a raw pointer.
@@ -181,7 +183,7 @@ impl<T> Stowaway<T> {
     /// If true, we're packing a T into a *mut T. Otherwise, we're
     /// using a box.
     ///
-    /// TODO: make this a const fn when && is allowed in const
+    /// TODO: make this a const fn when `if` is allowed in const
     #[inline(always)]
     fn size_class() -> SizeClass {
         assert_eq!(
@@ -190,17 +192,16 @@ impl<T> Stowaway<T> {
             "Cannot currently stow pointers to DSTs"
         );
 
-        if mem::size_of::<T>() == 0 {
-            SizeClass::Zero
-        } else if mem::size_of::<T>() <= mem::size_of::<*mut T>()
-            // Need to check alignment, just in case. However, in order for this
-            // to fail, we'd need a T value with an alignment larger than its own
-            // size.
-            && mem::align_of::<T>() <= mem::align_of::<*mut T>()
-        {
-            SizeClass::Packed
+        if mem::align_of::<T>() > mem::align_of::<*mut T>() {
+            // Need to unconditionally box values that don't match our
+            // alignment, even if sizeof(T) <= sizeof(Self)
+            Boxed
+        } else if mem::size_of::<T>() == 0 {
+            Zero
+        } else if mem::size_of::<T>() <= mem::size_of::<*mut T>() {
+            Packed
         } else {
-            SizeClass::Boxed
+            Boxed
         }
     }
 
@@ -211,12 +212,15 @@ impl<T> Stowaway<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         let storage = match Self::size_class() {
-            SizeClass::Zero => {
-                mem::forget(value);
-                ptr::null_mut()
-            }
-            SizeClass::Boxed => Box::into_raw(Box::new(value)),
-            SizeClass::Packed => {
+            // Box is known to not allocate for ZSTs, so we defer to it for
+            // managing in-place zero size values.
+            //
+            // TODO: make sure this is actually true. Dissasembly inspection
+            // reveals that it is at the time of this writing, but it's unclear
+            // if Box guarantees it an an API level. See Lucretiel/stowaway/#5
+            // for details.
+            Boxed | Zero => Box::into_raw(Box::new(value)),
+            Packed => {
                 // Need to init (zero) all bytes. Even if sizeof(T) == sizeof(*T),
                 // T may contain unused/uninit padding bytes. TODO: figure out a way
                 // to initialize these bytes (to the satisfaction of defined
@@ -275,11 +279,9 @@ impl<T> Stowaway<T> {
         mem::forget(stowed);
 
         match Self::size_class() {
-            // Safety: ptr::read is guaranteed to be a no-op for a ZST
-            SizeClass::Zero => unsafe { ptr::read(storage) },
             // Safety: we previously created a box in `new`
-            SizeClass::Boxed => *unsafe { Box::from_raw(storage) },
-            SizeClass::Packed => {
+            Boxed | Zero => *unsafe { Box::from_raw(storage) },
+            Packed => {
                 // This can all be done with transmute_copy, but:
                 // - I prefer to make sure the right casts are happening (
                 //   T vs *T vs **T)
@@ -365,13 +367,11 @@ mod test_for_uninit_bytes {
 
 impl<T> Drop for Stowaway<T> {
     fn drop(&mut self) {
+        // TODO: Deduplicate drop, into_inner, and as_ref
         match Self::size_class() {
-            // Safety: this value was previously owned by Self::new, and
-            // ptr::read on a zero-size type is a no-op
-            SizeClass::Zero => drop(unsafe { ptr::read(self.storage) }),
             // Safety: this box was previously created by Self::new
-            SizeClass::Boxed => drop(unsafe { Box::from_raw(self.storage) }),
-            SizeClass::Packed => {
+            Boxed | Zero => drop(unsafe { Box::from_raw(self.storage) }),
+            Packed => {
                 let storage = self.storage;
                 let ptr_to_storage: *const *mut T = &storage;
                 let ptr_to_value: *const T = ptr_to_storage as *const T;
@@ -578,12 +578,10 @@ impl<T> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
         let ptr_to_storage = match Self::size_class() {
-            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
-            SizeClass::Zero => self.storage,
             // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            SizeClass::Boxed => self.storage,
-            SizeClass::Packed => (&self.storage) as *const *mut T as *const T,
+            Boxed | Zero => self.storage,
+            Packed => (&self.storage) as *const *mut T as *const T,
         };
 
         unsafe { &*ptr_to_storage }
@@ -594,12 +592,10 @@ impl<T> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         let ptr_to_storage = match Self::size_class() {
-            // In the ZST case, ptr::read is a no-op, so the null ptr here is fine
-            SizeClass::Zero => self.storage,
             // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            SizeClass::Boxed => self.storage,
-            SizeClass::Packed => (&mut self.storage) as *mut *mut T as *mut T,
+            Boxed | Zero => self.storage,
+            Packed => (&mut self.storage) as *mut *mut T as *mut T,
         };
 
         unsafe { &mut *ptr_to_storage }

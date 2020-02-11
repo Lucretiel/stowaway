@@ -341,6 +341,7 @@ mod test_for_uninit_bytes {
     }
     #[test]
     fn t_with_gaps_32() {
+        #[repr(C)]
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct Gaps32 {
             a: u8,
@@ -353,6 +354,7 @@ mod test_for_uninit_bytes {
     }
     #[test]
     fn t_with_gaps_64() {
+        #[repr(C)]
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct Gaps64 {
             a: u8,

@@ -893,3 +893,10 @@ fn test_mut_ref_from_stowed_large() {
     let value: Vec<i64> = unsafe { unstow(storage) };
     assert_eq!(&value, &[3245, 5675, 4653, 1234, 7345, 10, 12]);
 }
+
+#[test]
+fn test_uninitialized_stowaway_new() {
+    type Uninint = MaybeUninit<usize>;
+
+    let _sto = Stowaway::new(Uninint::uninit());
+}

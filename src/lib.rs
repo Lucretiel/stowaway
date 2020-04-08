@@ -848,3 +848,24 @@ fn test_mut_ref_from_stowed_large() {
     let value: Vec<i64> = unsafe { unstow(storage) };
     assert_eq!(&value, &[3245, 5675, 4653, 1234, 7345, 10, 12]);
 }
+
+#[cfg(test)]
+type Uninint = MaybeUninit<usize>;
+
+#[test]
+fn test_uninitialized_stowaway_new() {
+    let sto = Stowaway::new(Uninint::uninit());
+
+    let raw = Stowaway::into_raw(sto);
+
+    // check for uninitialized bytes in `into_raw`
+    assert_eq!(raw.wrapping_add(1) as usize, (raw as usize).wrapping_add(1));
+}
+
+#[test]
+fn test_uninitialized_stowed() {
+    let raw = stow(Uninint::uninit());
+
+    // check for uninitialized bytes in `into_raw`
+    assert_eq!(raw.wrapping_add(1) as usize, (raw as usize).wrapping_add(1));
+}

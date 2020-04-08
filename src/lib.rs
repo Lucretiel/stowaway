@@ -36,7 +36,7 @@
 //!     let cloned = value.clone();
 //!
 //!     let stowed: Stowaway<T> = Stowaway::new(value);
-//!     let storage = Stowaway::into_raw(stowed);
+//!     let storage = unsafe { Stowaway::into_raw(stowed) };
 //!     // At this point, the storage pointer would be passed into a C API,
 //!     // and recovered somewhere else
 //!     let new_stowed: Stowaway<T> = unsafe { Stowaway::from_raw(storage) };
@@ -103,8 +103,10 @@
 //!     }
 //! }
 //!
-//! event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(10u16)));
-//! event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(20u16)));
+//! unsafe {
+//!     event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(10u16)));
+//!     event_list.add_event(print_u16, Stowaway::into_raw(Stowaway::new(20u16)));
+//! }
 //!
 //! // Event 2: Print a large array (`[u64; 8]`). This won't definitely won't fit
 //! // in a pointer, so stowaway will automatically allocate it for us
@@ -116,10 +118,10 @@
 //! }
 //!
 //! let data: [u64; 8] = [1, 1, 2, 3, 5, 8, 13, 21];
-//! event_list.add_event(print_big_array, Stowaway::into_raw(Stowaway::new(data)));
+//! unsafe { event_list.add_event(print_big_array, Stowaway::into_raw(Stowaway::new(data))); }
 //!
 //! let data: [u64; 8] = [34, 55, 89, 144, 233, 377, 610, 987];
-//! event_list.add_event(print_big_array, Stowaway::into_raw(Stowaway::new(data)));
+//! unsafe { event_list.add_event(print_big_array, Stowaway::into_raw(Stowaway::new(data))); }
 //!
 //! // Execute all the events
 //! event_list.run_all_events();
@@ -164,7 +166,7 @@ use SizeClass::*;
 ///
 /// let value1: usize = 256;
 /// let value1_stowed = Stowaway::new(value1);
-/// let storage: *mut() = Stowaway::into_raw(value1_stowed);
+/// let storage: *mut() = unsafe { Stowaway::into_raw(value1_stowed) };
 /// let value2_stowed = unsafe { Stowaway::from_raw(storage) };
 /// let value2: usize = Stowaway::into_inner(value2_stowed);
 ///
@@ -174,9 +176,13 @@ use SizeClass::*;
 // that it boxes large values and copies small ones.
 #[repr(transparent)]
 pub struct Stowaway<T> {
+    // This is a `MaybeUninit<*mut T>` because in the case where `T` is stored
+    // inline, `T` may contain uninitialized bytes. see [this](https://github.com/Lucretiel/stowaway/issues/8) for
+    // more information
+    //
     // TODO: Reimplemnt this as union, once we can have non-copy fields in a
     // union.
-    storage: *mut T,
+    storage: MaybeUninit<*mut T>,
 }
 
 impl<T> Stowaway<T> {
@@ -219,7 +225,7 @@ impl<T> Stowaway<T> {
             // reveals that it is at the time of this writing, but it's unclear
             // if Box guarantees it an an API level. See Lucretiel/stowaway/#5
             // for details.
-            Boxed | Zero => Box::into_raw(Box::new(value)),
+            Boxed | Zero => MaybeUninit::new(Box::into_raw(Box::new(value))),
             Packed => {
                 // Need to init (zero) all bytes. Even if sizeof(T) == sizeof(*T),
                 // T may contain unused/uninit padding bytes. TODO: figure out a way
@@ -238,7 +244,7 @@ impl<T> Stowaway<T> {
 
                     // Safety: all the bytes of blob were initialized, either
                     // as zero or with `value`
-                    blob.assume_init()
+                    blob
                 }
             }
         };
@@ -268,7 +274,7 @@ impl<T> Stowaway<T> {
     #[inline]
     pub unsafe fn from_raw(storage: *mut ()) -> Self {
         Self {
-            storage: storage as *mut T,
+            storage: MaybeUninit::new(storage as *mut T),
         }
     }
 
@@ -279,8 +285,10 @@ impl<T> Stowaway<T> {
         mem::forget(stowed);
 
         match Self::size_class() {
-            // Safety: we previously created a box in `new`
-            Boxed | Zero => *unsafe { Box::from_raw(storage) },
+            // Safety:
+            // * we previously created a box in `new`
+            // * storage must be initialized if `SizeClass` is `Boxed` or `Zero`
+            Boxed | Zero => *unsafe { Box::from_raw(storage.assume_init()) },
             Packed => {
                 // This can all be done with transmute_copy, but:
                 // - I prefer to make sure the right casts are happening (
@@ -288,7 +296,7 @@ impl<T> Stowaway<T> {
                 // - transmute_copy uses an unaligned read, which we don't need
                 // - I prefer to pair read/write calls, as opposed to using
                 //   `write` in `new` but `transmute` here.
-                let ptr_to_storage: *const *mut T = &storage;
+                let ptr_to_storage: *const *mut T = storage.as_ptr();
                 let ptr_to_value: *const T = ptr_to_storage as *const T;
 
                 // Safety:
@@ -311,11 +319,20 @@ impl<T> Stowaway<T> {
     /// it back into a [`Stowaway`]. In particular, it is undefined behavior
     /// to create two [`Stowaway`] instances from the same raw pointer (even
     /// if `T` is `Copy`!).
+    ///
+    /// # Safety
+    ///
+    /// If `size_of::<T>() <= size_of::<*mut T>()` and `align_of::<T>() <= align_of::<*mut T>()` then
+    /// `T` must contain no uninitialized bytes.
     #[inline]
-    pub fn into_raw(stowed: Self) -> *mut () {
+    pub unsafe fn into_raw(stowed: Self) -> *mut () {
         let storage = stowed.storage;
         mem::forget(stowed);
-        storage as *mut ()
+
+        // # Safety
+        // we can assume that there are no uninitialized bytes because that is the invariant
+        // requried to call `into_raw`
+        storage.assume_init() as *mut ()
     }
 }
 // These tests are designed to detect undefined behavior in miri under naive,
@@ -328,16 +345,20 @@ mod test_for_uninit_bytes {
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         struct Zst;
         let x = Zst;
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
+        unsafe {
+            let stowed = stow(x);
+            let unstowed = unstow(stowed);
+            assert_eq!(x, unstowed);
+        }
     }
     #[test]
     fn small_t() {
         let x: u8 = 7;
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
+        unsafe {
+            let stowed = stow(x);
+            let unstowed = unstow(stowed);
+            assert_eq!(x, unstowed);
+        }
     }
     #[test]
     fn t_with_gaps_32() {
@@ -348,9 +369,11 @@ mod test_for_uninit_bytes {
             b: u16,
         }
         let x = Gaps32 { a: 7, b: 42 };
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
+        unsafe {
+            let stowed = stow(x);
+            let unstowed = unstow(stowed);
+            assert_eq!(x, unstowed);
+        }
     }
     #[test]
     fn t_with_gaps_64() {
@@ -361,9 +384,11 @@ mod test_for_uninit_bytes {
             b: u32,
         }
         let x = Gaps64 { a: 7, b: 42 };
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
+        unsafe {
+            let stowed = stow(x);
+            let unstowed = unstow(stowed);
+            assert_eq!(x, unstowed);
+        }
     }
 }
 
@@ -371,11 +396,13 @@ impl<T> Drop for Stowaway<T> {
     fn drop(&mut self) {
         // TODO: Deduplicate drop, into_inner, and as_ref
         match Self::size_class() {
-            // Safety: this box was previously created by Self::new
-            Boxed | Zero => drop(unsafe { Box::from_raw(self.storage) }),
+            // Safety:
+            // * we previously created a box in `new`
+            // * storage must be initialized if `SizeClass` is `Boxed` or `Zero`
+            Boxed | Zero => drop(unsafe { Box::from_raw(self.storage.assume_init()) }),
             Packed => {
                 let storage = self.storage;
-                let ptr_to_storage: *const *mut T = &storage;
+                let ptr_to_storage: *const *mut T = storage.as_ptr();
                 let ptr_to_value: *const T = ptr_to_storage as *const T;
 
                 // Safety:
@@ -424,7 +451,8 @@ mod test_drop {
             let stowed_value = Stowaway::new(value);
             assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
 
-            let storage = Stowaway::into_raw(stowed_value);
+            // Safety: `StaticDropCounter` is zero-sized
+            let storage = unsafe { Stowaway::into_raw(stowed_value) };
             assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
 
             let stowed_value = unsafe { Stowaway::<StaticDropCounter>::from_raw(storage) };
@@ -447,7 +475,8 @@ mod test_drop {
         let stowed_value = Stowaway::new(value);
         assert_eq!(counter.get(), 0);
 
-        let storage = Stowaway::into_raw(stowed_value);
+        // Safety: `DropCounter` contains no uninitialized bytes
+        let storage = unsafe { Stowaway::into_raw(stowed_value) };
         assert_eq!(counter.get(), 0);
 
         let stowed_value = unsafe { Stowaway::<DropCounter>::from_raw(storage) };
@@ -469,7 +498,8 @@ mod test_drop {
         let stowed_value = Stowaway::new(value);
         assert_eq!(counter.get(), 0);
 
-        let storage = Stowaway::into_raw(stowed_value);
+        // Safety: `DropCounter` contains no uninitialized bytes
+        let storage = unsafe { Stowaway::into_raw(stowed_value) };
         assert_eq!(counter.get(), 0);
 
         let stowed_value = unsafe { Stowaway::<DropCounter>::from_raw(storage) };
@@ -511,7 +541,8 @@ mod test_drop {
         let stowed_value = Stowaway::new(value);
         assert_eq!(counter.get(), 0);
 
-        let storage = Stowaway::into_raw(stowed_value);
+        // Safety: `[DropCounter; 16]` contains no uninitialized bytes
+        let storage = unsafe { Stowaway::into_raw(stowed_value) };
         assert_eq!(counter.get(), 0);
 
         let stowed_value = unsafe { Stowaway::<[DropCounter; 16]>::from_raw(storage) };
@@ -550,7 +581,8 @@ mod test_drop {
         let stowed_value = Stowaway::new(value);
         assert_eq!(counter.get(), 0);
 
-        let storage = Stowaway::into_raw(stowed_value);
+        // Safety: `[DropCounter; 16]` contains no uninitialized bytes
+        let storage = unsafe { Stowaway::into_raw(stowed_value) };
         assert_eq!(counter.get(), 0);
 
         let stowed_value = unsafe { Stowaway::<[DropCounter; 16]>::from_raw(storage) };
@@ -580,10 +612,12 @@ impl<T> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
         let ptr_to_storage = match Self::size_class() {
+            // Safety:
             // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            Boxed | Zero => self.storage,
-            Packed => (&self.storage) as *const *mut T as *const T,
+            // * storage must be initialized if `SizeClass` is `Boxed` or `Zero`
+            Boxed | Zero => unsafe { self.storage.assume_init() },
+            Packed => self.storage.as_ptr() as *const *mut T as *const T,
         };
 
         unsafe { &*ptr_to_storage }
@@ -594,10 +628,12 @@ impl<T> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         let ptr_to_storage = match Self::size_class() {
+            // Safety:
             // In the box case, storage IS a valid pointer, so simply
             // dereference it
-            Boxed | Zero => self.storage,
-            Packed => (&mut self.storage) as *mut *mut T as *mut T,
+            // * storage must be initialized if `SizeClass` is `Boxed` or `Zero`
+            Boxed | Zero => unsafe { self.storage.assume_init() },
+            Packed => self.storage.as_mut_ptr() as *mut *mut T as *mut T,
         };
 
         unsafe { &mut *ptr_to_storage }
@@ -650,8 +686,13 @@ unsafe impl<T: Sync> Sync for Stowaway<T> {}
 /// [`unstow`], or converted into a [`Stowaway`] with [`Stowaway::from_raw`]
 ///
 /// This is the equivalent of `Stowaway::into_raw(Stowaway::new(value))`
+///
+/// # Safety
+///
+/// If `size_of::<T>() <= size_of::<*mut T>()` and `align_of::<T>() <= align_of::<*mut T>()` then
+/// `T` must contain no uninitialized bytes.
 #[inline]
-pub fn stow<T>(value: T) -> *mut () {
+pub unsafe fn stow<T>(value: T) -> *mut () {
     Stowaway::into_raw(Stowaway::new(value))
 }
 
@@ -719,7 +760,7 @@ pub unsafe fn unstow<T>(storage: *mut ()) -> T {
 /// use stowaway::{ref_from_stowed, stow, unstow};
 ///
 /// let value: i16 = 143;
-/// let mut storage = stow(value);
+/// let mut storage = unsafe { stow(value) };
 /// {
 ///     let value_ref_1: &i16 = unsafe { ref_from_stowed(&storage) };
 ///     let value_ref_2: &i16 = unsafe { ref_from_stowed(&storage) };
@@ -740,7 +781,7 @@ pub unsafe fn ref_from_stowed<'a, T>(storage_ref: &'a *mut ()) -> &'a T {
 #[test]
 fn test_ref_from_stowed_small() {
     let value: u16 = 173;
-    let storage = stow(value);
+    let storage = unsafe { stow(value) };
 
     {
         let value_ref_1: &u16 = unsafe { ref_from_stowed(&storage) };
@@ -760,7 +801,9 @@ fn test_ref_from_stowed_large() {
     use alloc::vec::Vec;
 
     let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
-    let storage = stow(value);
+
+    // Safety: `Vec<i64>` is not stored inline
+    let storage = unsafe { stow(value) };
 
     {
         let value_ref_1: &Vec<i64> = unsafe { ref_from_stowed(&storage) };
@@ -799,7 +842,7 @@ fn test_ref_from_stowed_large() {
 /// use stowaway::{mut_ref_from_stowed, stow, unstow};
 ///
 /// let value: Vec<i64> = vec![1, 2, 3, 4];
-/// let mut storage = stow(value);
+/// let mut storage = unsafe { stow(value) };
 /// {
 ///     let value_ref: &mut Vec<i64> = unsafe { mut_ref_from_stowed(&mut storage) };
 ///     value_ref.push(5);
@@ -818,7 +861,7 @@ pub unsafe fn mut_ref_from_stowed<'a, T>(storage_ref: &'a mut *mut ()) -> &'a mu
 #[test]
 fn test_mut_ref_from_stowed_small() {
     let value: u16 = 173;
-    let mut storage = stow(value);
+    let mut storage = unsafe { stow(value) };
 
     {
         let value_ref: &mut u16 = unsafe { mut_ref_from_stowed(&mut storage) };
@@ -836,7 +879,9 @@ fn test_mut_ref_from_stowed_large() {
     use alloc::vec::Vec;
 
     let value: Vec<i64> = vec![3245, 5675, 4653, 1234, 7345];
-    let mut storage = stow(value);
+
+    // Safety: `Vec<i64>` is not stored inline
+    let mut storage = unsafe { stow(value) };
 
     {
         let value_ref: &mut Vec<i64> = unsafe { mut_ref_from_stowed(&mut storage) };

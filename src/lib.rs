@@ -234,7 +234,27 @@ impl<T> Stowaway<T> {
                     // that there are enough of them, and that blob takes ownership
                     // of value. This write call is paired with a `read` call in
                     // `into_inner`.
+
+                    #[cfg(not(miri))]
                     ptr::write(ptr as *mut T, value);
+
+                    #[cfg(miri)]
+                    {
+                        // we use this alternative implementation of write because we want
+                        // MIRI to catch illegal padding bytes in `Stowaway::into_raw`
+
+                        // under the current implementation of `ptr::write`, padding bytes are not always copied
+                        // this means that MIRI will see zeros where the paddings bytes are suppoed to be
+                        // and allows it. But this is *still* undefined behavior! So in order to make it easier
+                        // for MIRI to catch this behavior, we manually copy padding bytes
+
+                        ptr::copy_nonoverlapping(
+                            &value as *const T as *const u8,
+                            ptr as *mut u8,
+                            core::mem::size_of::<T>(),
+                        );
+                        core::mem::forget(value);
+                    }
 
                     // Safety: all the bytes of blob were initialized, either
                     // as zero or with `value`
@@ -332,6 +352,7 @@ mod test_for_uninit_bytes {
         let unstowed = unsafe { unstow(stowed) };
         assert_eq!(x, unstowed);
     }
+
     #[test]
     fn small_t() {
         let x: u8 = 7;
@@ -339,31 +360,12 @@ mod test_for_uninit_bytes {
         let unstowed = unsafe { unstow(stowed) };
         assert_eq!(x, unstowed);
     }
+
     #[test]
-    fn t_with_gaps_32() {
-        #[repr(C)]
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        struct Gaps32 {
-            a: u8,
-            b: u16,
-        }
-        let x = Gaps32 { a: 7, b: 42 };
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
-    }
-    #[test]
-    fn t_with_gaps_64() {
-        #[repr(C)]
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        struct Gaps64 {
-            a: u8,
-            b: u32,
-        }
-        let x = Gaps64 { a: 7, b: 42 };
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
+    fn test_uninitialized_stowaway_new() {
+        type Uninint = core::mem::MaybeUninit<usize>;
+
+        let _sto = super::Stowaway::new(Uninint::uninit());
     }
 }
 

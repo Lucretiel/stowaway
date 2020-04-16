@@ -167,16 +167,34 @@ mod std_extras;
 /// stowaway, but will be unconditionally boxed, to ensure those bytes are not
 /// packed.
 ///
+/// This trait is implemented for most primitive and standard library types
+/// you might want to stow:
+/// - All integer & float types.
+/// - `bool` and `char`.
+/// - All primitive pointer types.
+/// - All arrays of `Stowable` (up to length 32, until const generics are stable)
+/// - All structured pointer types (`Rc`, `Arc`, etc)
+///
 /// # Safety
 ///
 /// Correct usage of this trait is critical to stowaway's safety guarantees.
-/// This struct can only be implemented with MUST_BOX == false for types that
+/// This struct can only be implemented with `MUST_BOX == false` for types that
 /// can never have uninitialized bytes *anywhere* in their representation
-/// (including padding bytes).
+/// (including padding bytes). Making this determination isn't trivial, though
+/// typically it's safe if `sizeof(T) == sum(sizeof(fields in T))`, and all
+/// of the fields in `T` are themselves stowable without `MUST_BOX`.
+///
+/// Structs which are `repr(transparent)` are safely stowable with
+/// `MUST_BOX == false` if the inner type is also stowable with
+/// `MUST_BOX == false`.
 pub unsafe trait Stowable: Sized {
     /// For objects with padding bytes or other uninitialized bytes that you
-    /// still want to use with stowaway, set this to true. It *is* safe to
-    /// implement `Stowable` for *any* type if MUST_BOX is true.
+    /// still want to use with stowaway, set this to true. This will cause
+    /// stowaway to unconditionally box the stowed type, even if it would
+    /// otherwise fit in a packed representation. It is safe to implement
+    /// `Stowable` for any type if `MUST_BOX` is true.
+    ///
+    /// Defaults to `false`.
     const MUST_BOX: bool = false;
 }
 
@@ -194,8 +212,9 @@ macro_rules! stowable_primitive {
 }
 
 stowable_primitive! {
-    u8 u16 u32 u64 // u128
-    i8 i16 i32 i64 // i128
+    u8 u16 u32 u64
+    i8 i16 i32 i64
+    f32 f64
     usize isize
     bool char
 }
@@ -251,13 +270,14 @@ unsafe impl<T> Stowable for *const T {}
 unsafe impl<T> Stowable for *mut T {}
 unsafe impl<T> Stowable for &T {}
 
-/// Zero-size types are always fine
+// Zero-size types are always fine
 unsafe impl Stowable for () {}
 
-/// Vec is always (ptr, size, cap)
+// Vec is always `(ptr, size, cap)`
 unsafe impl<T> Stowable for Vec<T> {}
 
-/// MaybeUninit can obviously contain uninit bytes
+// MaybeUninit can obviously contain uninit bytes. It is stowable with
+// `MUST_BOX == true`.
 unsafe impl<T> Stowable for MaybeUninit<T> {
     const MUST_BOX: bool = true;
 }
@@ -274,6 +294,9 @@ use SizeClass::*;
 /// A maybe-allocated container. This struct stores a single `T` value, either
 /// by boxing it or (if `T` is small enough) by packing it directly into the bytes
 /// of a raw pointer.
+///
+/// Types stored in a `Stowaway` must implement [`Stowable`] in order to
+/// prevent unsound behavior related to uninitialized bytes.
 ///
 /// See the [module level documentation][crate] for more information.
 ///

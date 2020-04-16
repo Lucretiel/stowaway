@@ -137,20 +137,18 @@
 //! }
 //! ```
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 
 extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::rc::{Rc, Weak as RcWeak};
+use alloc::sync::{Arc, Weak as ArcWeak};
 use alloc::vec::Vec;
 use core::fmt;
 use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
-
-#[cfg(feature = "std")]
-mod std_extras;
 
 /// Marker trait to indicate which types are safe to stow.
 ///
@@ -158,14 +156,9 @@ mod std_extras;
 /// in a primitive type, such as a pointer or usize, even if that memory is
 /// never "used". This means that types that have uninitialized bytes in their
 /// representation (such as structs with padding bytes) cannot be packed by
-/// stowaway, even if they would otherwise fit.
-///
-/// It's not currently possible to detect if a struct might contain
-/// uninitialized bytes, so any types that want to be stowed must
-/// implement this trait. MUST_BOX **must** be set to true for types which
-/// may contain uninitialized bytes; these types are still compatible with
-/// stowaway, but will be unconditionally boxed, to ensure those bytes are not
-/// packed.
+/// stowaway, even if they would otherwise fit. It's not currently possible
+/// to detect if a struct might contain uninitialized bytes, so any types that
+/// want to be stowed must implement this trait.
 ///
 /// This trait is implemented for most primitive and standard library types
 /// you might want to stow:
@@ -178,25 +171,15 @@ mod std_extras;
 /// # Safety
 ///
 /// Correct usage of this trait is critical to stowaway's safety guarantees.
-/// This struct can only be implemented with `MUST_BOX == false` for types that
-/// can never have uninitialized bytes *anywhere* in their representation
-/// (including padding bytes). Making this determination isn't trivial, though
-/// typically it's safe if `sizeof(T) == sum(sizeof(fields in T))`, and all
-/// of the fields in `T` are themselves stowable without `MUST_BOX`.
+/// This struct can only be implemented on types that can never have
+/// uninitialized bytes *anywhere* in their representation (including padding
+/// bytes). Making this determination isn't trivial, though typically it's
+/// safe if `sizeof(T) == sum(sizeof(fields in T))`, and all of the fields in
+/// `T` are themselves `Stowable`.
 ///
-/// Structs which are `repr(transparent)` are safely stowable with
-/// `MUST_BOX == false` if the inner type is also stowable with
-/// `MUST_BOX == false`.
-pub unsafe trait Stowable: Sized {
-    /// For objects with padding bytes or other uninitialized bytes that you
-    /// still want to use with stowaway, set this to true. This will cause
-    /// stowaway to unconditionally box the stowed type, even if it would
-    /// otherwise fit in a packed representation. It is safe to implement
-    /// `Stowable` for any type if `MUST_BOX` is true.
-    ///
-    /// Defaults to `false`.
-    const MUST_BOX: bool = false;
-}
+/// Structs which are `repr(transparent)` are `Stowable` if their inner field
+/// is `Stowable`.
+pub unsafe trait Stowable: Sized {}
 
 // TODO: determine when enums are safe to stow. For instance, is an
 // Option<usize> safe to stow? if the representation is IIIIIIII?UUUUUUU,
@@ -237,6 +220,8 @@ stowable_ptr! {
     Rc<T> Option<Rc<T>>
     RcWeak<T> Option<RcWeak<T>>
     NonNull<T> Option<NonNull<T>>
+    Arc<T> Option<Arc<T>>
+    ArcWeak<T> Option<ArcWeak<T>>
 }
 
 /// Implement stowable for array types. This is sounds because all types have
@@ -245,9 +230,7 @@ stowable_ptr! {
 // TODO: use rustversion to opt-in to const generics if this is a nightly build
 macro_rules! stowable_array {
     ($($N:literal)*) => {$(
-        unsafe impl<T: Stowable> Stowable for [T; $N] {
-            const MUST_BOX: bool = T::MUST_BOX;
-        }
+        unsafe impl<T: Stowable> Stowable for [T; $N] {}
     )*};
 }
 
@@ -259,8 +242,7 @@ stowable_array! {
     27 28 29 30 31 32
 }
 
-// Stowaway instances are raw pointers. If T is MUST_BOX, then Stowaway<T>
-// contains a boxed instance of T, which means it is still safe to stow.
+// Stowaway instances are raw pointers.
 unsafe impl<T: Stowable> Stowable for Stowaway<T> {}
 
 // Pointers are obviously safe to stow. References are technically safe to
@@ -269,18 +251,15 @@ unsafe impl<T: Stowable> Stowable for Stowaway<T> {}
 unsafe impl<T> Stowable for *const T {}
 unsafe impl<T> Stowable for *mut T {}
 unsafe impl<T> Stowable for &T {}
+unsafe impl<T> Stowable for Option<&mut T> {}
+unsafe impl<T> Stowable for Option<&T> {}
+unsafe impl<T> Stowable for &mut T {}
 
 // Zero-size types are always fine
 unsafe impl Stowable for () {}
 
 // Vec is always `(ptr, size, cap)`
 unsafe impl<T> Stowable for Vec<T> {}
-
-// MaybeUninit can obviously contain uninit bytes. It is stowable with
-// `MUST_BOX == true`.
-unsafe impl<T> Stowable for MaybeUninit<T> {
-    const MUST_BOX: bool = true;
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum SizeClass {
@@ -296,9 +275,11 @@ use SizeClass::*;
 /// of a raw pointer.
 ///
 /// Types stored in a `Stowaway` must implement [`Stowable`] in order to
-/// prevent unsound behavior related to uninitialized bytes.
+/// prevent unsound behavior related to uninitialized bytes. See
+/// [issue #8](https://github.com/Lucretiel/stowaway/issues/8) for details.
 ///
-/// See the [module level documentation][crate] for more information.
+/// See the [module level documentation][crate] for more information on how
+/// this type is used.
 ///
 /// # Example
 ///
@@ -326,9 +307,7 @@ impl<T: Stowable> Stowaway<T> {
     /// TODO: make this a const fn when `if` is allowed in const
     #[inline(always)]
     fn size_class() -> SizeClass {
-        if T::MUST_BOX {
-            Boxed
-        } else if mem::size_of::<T>() == 0 {
+        if mem::size_of::<T>() == 0 {
             Zero
         } else if mem::size_of::<T>() <= mem::size_of::<*mut T>() {
             Packed
@@ -380,6 +359,7 @@ impl<T: Stowable> Stowaway<T> {
                         // the paddings bytes are suppoed to be and allows it. But this is
                         // *still* undefined behavior! So in order to make it easier for MIRI
                         // to catch this behavior, we manually copy padding bytes
+                        // For more details, see https://github.com/rust-lang/miri/issues/1340.
 
                         ptr::copy_nonoverlapping(
                             &value as *const T as *const u8,

@@ -16,7 +16,3 @@ rustversion = "1.0.2"
 [badges]
 travis-ci = { repository = "Lucretiel/joinery" }
 maintenance = { status = "actively-developed" }
-
-[features]
-default = ["std"]
-std = []

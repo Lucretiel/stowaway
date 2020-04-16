@@ -971,11 +971,4 @@ mod test_for_uninit_bytes {
         let unstowed = unsafe { unstow(stowed) };
         assert_eq!(x, unstowed);
     }
-
-    #[test]
-    fn test_uninitialized_stowaway_new() {
-        type Uninint = core::mem::MaybeUninit<usize>;
-
-        let _sto = super::Stowaway::new(Uninint::uninit());
-    }
 }

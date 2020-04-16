@@ -1,5 +1,3 @@
-#![no_std]
-
 //! Stowaway is a library for efficiently storing values in a pointer. The
 //! main use case for stowaway is as a helpful way to interoperate with
 //! libraries that require opaque data to be passed via pointer, such as C
@@ -27,12 +25,17 @@
 //! - Covert the [`Stowaway`] back into a `T`, or use it as a container with
 //!   `Deref` / `AsRef` / `DerefMut` / `AsMut`.
 //!
+//! The value must have the [`Stowable`] marker trait; this trait informs
+//! the type system that the type does not contain any uninitialized bytes
+//! which might be packed into the pointer value (or, if it does, to box it
+//! unconditionally).
+//!
 //! ## Simple example:
 //!
 //! ```
-//! use stowaway::Stowaway;
+//! use stowaway::{Stowaway, Stowable };
 //!
-//! fn demo_lifecycle<T: Clone + std::fmt::Debug + Eq>(value: T) {
+//! fn demo_lifecycle<T: Clone + std::fmt::Debug + Eq + Stowable>(value: T) {
 //!     let cloned = value.clone();
 //!
 //!     let stowed: Stowaway<T> = Stowaway::new(value);
@@ -134,13 +137,130 @@
 //! }
 //! ```
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::rc::{Rc, Weak as RcWeak};
+use alloc::vec::Vec;
 use core::fmt;
 use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
-use core::ptr;
+use core::ptr::{self, NonNull};
+
+#[cfg(feature = "std")]
+mod std_extras;
+
+/// Marker trait to indicate which types are safe to stow.
+///
+/// Currently, it is undefined behavior to read/write uninitialized memory
+/// in a primitive type, such as a pointer or usize, even if that memory is
+/// never "used". This means that types that have uninitialized bytes in their
+/// representation (such as structs with padding bytes) cannot be packed by
+/// stowaway, even if they would otherwise fit.
+///
+/// It's not currently possible to detect if a struct might contain
+/// uninitialized bytes, so any types that want to be stowed must
+/// implement this trait. MUST_BOX **must** be set to true for types which
+/// may contain uninitialized bytes; these types are still compatible with
+/// stowaway, but will be unconditionally boxed, to ensure those bytes are not
+/// packed.
+///
+/// # Safety
+///
+/// Correct usage of this trait is critical to stowaway's safety guarantees.
+/// This struct can only be implemented with MUST_BOX == false for types that
+/// can never have uninitialized bytes *anywhere* in their representation
+/// (including padding bytes).
+pub unsafe trait Stowable: Sized {
+    /// For objects with padding bytes or other uninitialized bytes that you
+    /// still want to use with stowaway, set this to true. It *is* safe to
+    /// implement `Stowable` for *any* type if MUST_BOX is true.
+    const MUST_BOX: bool = false;
+}
+
+// TODO: determine when enums are safe to stow. For instance, is an
+// Option<usize> safe to stow? if the representation is IIIIIIII?UUUUUUU,
+// where I is the int part and ? is the discriminant, probably not.
+// At the very least, types where sizeof(Option<T>) == sizeof(T) are always
+// safe to stow as long as T is safe to stow.
+
+/// Implement stowable for primitive types
+macro_rules! stowable_primitive {
+    ($($type:ty)*) => {$(
+        unsafe impl Stowable for $type {}
+    )*};
+}
+
+stowable_primitive! {
+    u8 u16 u32 u64 // u128
+    i8 i16 i32 i64 // i128
+    usize isize
+    bool char
+}
+
+#[rustversion::since(1.26)]
+stowable_primitive! {
+    u128 i128
+}
+
+/// Implement stowable for pointer-wrapper types
+macro_rules! stowable_ptr {
+    (impl <$generic:ident> for $($type:ty)*) => {$(
+        unsafe impl<$generic: ?Sized> Stowable for $type {}
+    )*}
+}
+
+stowable_ptr! {
+    impl<T> for
+    Box<T> Option<Box<T>>
+    Rc<T> Option<Rc<T>>
+    RcWeak<T> Option<RcWeak<T>>
+    NonNull<T> Option<NonNull<T>>
+}
+
+/// Implement stowable for array types. This is sounds because all types have
+/// a size that is a multiple of their alignment, so there's no type that is
+/// stowable but an array is not stowable.
+// TODO: use rustversion to opt-in to const generics if this is a nightly build
+macro_rules! stowable_array {
+    ($($N:literal)*) => {$(
+        unsafe impl<T: Stowable> Stowable for [T; $N] {
+            const MUST_BOX: bool = T::MUST_BOX;
+        }
+    )*};
+}
+
+stowable_array! {
+    0 1 2 3 4 5 6 7 8
+    9  10 11 12 13 14
+    15 16 17 18 19 20
+    21 22 23 24 25 26
+    27 28 29 30 31 32
+}
+
+// Stowaway instances are raw pointers. If T is MUST_BOX, then Stowaway<T>
+// contains a boxed instance of T, which means it is still safe to stow.
+unsafe impl<T: Stowable> Stowable for Stowaway<T> {}
+
+// Pointers are obviously safe to stow. References are technically safe to
+// stow; the user must ensure that the lifetimes are correctly reconstructed
+// when calling from_raw.
+unsafe impl<T> Stowable for *const T {}
+unsafe impl<T> Stowable for *mut T {}
+unsafe impl<T> Stowable for &T {}
+
+/// Zero-size types are always fine
+unsafe impl Stowable for () {}
+
+/// Vec is always (ptr, size, cap)
+unsafe impl<T> Stowable for Vec<T> {}
+
+/// MaybeUninit can obviously contain uninit bytes
+unsafe impl<T> Stowable for MaybeUninit<T> {
+    const MUST_BOX: bool = true;
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum SizeClass {
@@ -173,28 +293,17 @@ use SizeClass::*;
 // TODO: Find a way to test that this actually does what it claims; that is,
 // that it boxes large values and copies small ones.
 #[repr(transparent)]
-pub struct Stowaway<T> {
-    // TODO: Reimplemnt this as union, once we can have non-copy fields in a
+pub struct Stowaway<T: Stowable> {
+    // TODO: Reimplement this as union, once we can have non-copy fields in a
     // union.
     storage: *mut T,
 }
 
-impl<T> Stowaway<T> {
-    /// If true, we're packing a T into a *mut T. Otherwise, we're
-    /// using a box.
-    ///
+impl<T: Stowable> Stowaway<T> {
     /// TODO: make this a const fn when `if` is allowed in const
     #[inline(always)]
     fn size_class() -> SizeClass {
-        assert_eq!(
-            mem::size_of::<*mut T>(),
-            mem::size_of::<*mut ()>(),
-            "Cannot currently stow pointers to DSTs"
-        );
-
-        if mem::align_of::<T>() > mem::align_of::<*mut T>() {
-            // Need to unconditionally box values that don't match our
-            // alignment, even if sizeof(T) <= sizeof(Self)
+        if T::MUST_BOX {
             Boxed
         } else if mem::size_of::<T>() == 0 {
             Zero
@@ -203,6 +312,10 @@ impl<T> Stowaway<T> {
         } else {
             Boxed
         }
+        // Previously we checked the alignment of T, but the only way for
+        // alignof(T) > alignof(ptr) to be true is if
+        // sizeof(t) == 0 or sizeof(T) > sizeof(ptr), both of which are
+        // handled.
     }
 
     /// Create a new `Stowaway`. If `T` can fit into a pointer, it will be
@@ -214,11 +327,6 @@ impl<T> Stowaway<T> {
         let storage = match Self::size_class() {
             // Box is known to not allocate for ZSTs, so we defer to it for
             // managing in-place zero size values.
-            //
-            // TODO: make sure this is actually true. Dissasembly inspection
-            // reveals that it is at the time of this writing, but it's unclear
-            // if Box guarantees it an an API level. See Lucretiel/stowaway/#5
-            // for details.
             Boxed | Zero => Box::into_raw(Box::new(value)),
             Packed => {
                 // Need to init (zero) all bytes. Even if sizeof(T) == sizeof(*T),
@@ -232,8 +340,9 @@ impl<T> Stowaway<T> {
                 unsafe {
                     // Safety: We know that the underlying bytes are unused, and
                     // that there are enough of them, and that blob takes ownership
-                    // of value. This write call is paired with a `read` call in
-                    // `into_inner`.
+                    // of value. We know, because of the Stowable trait, that
+                    // T has promised it contains no uninitialized bytes. This
+                    // write call is paired with a `read` call in `into_inner`.
 
                     #[cfg(not(miri))]
                     ptr::write(ptr as *mut T, value);
@@ -243,10 +352,11 @@ impl<T> Stowaway<T> {
                         // we use this alternative implementation of write because we want
                         // MIRI to catch illegal padding bytes in `Stowaway::into_raw`
 
-                        // under the current implementation of `ptr::write`, padding bytes are not always copied
-                        // this means that MIRI will see zeros where the paddings bytes are suppoed to be
-                        // and allows it. But this is *still* undefined behavior! So in order to make it easier
-                        // for MIRI to catch this behavior, we manually copy padding bytes
+                        // under the current implementation of `ptr::write`, padding bytes
+                        // are not always copied this means that MIRI will see zeros where
+                        // the paddings bytes are suppoed to be and allows it. But this is
+                        // *still* undefined behavior! So in order to make it easier for MIRI
+                        // to catch this behavior, we manually copy padding bytes
 
                         ptr::copy_nonoverlapping(
                             &value as *const T as *const u8,
@@ -338,38 +448,8 @@ impl<T> Stowaway<T> {
         storage as *mut ()
     }
 }
-// These tests are designed to detect undefined behavior in miri under naive,
-// incorrect implementations of Stowaway.
-#[cfg(test)]
-mod test_for_uninit_bytes {
-    use crate::{stow, unstow};
-    #[test]
-    fn zst() {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        struct Zst;
-        let x = Zst;
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
-    }
 
-    #[test]
-    fn small_t() {
-        let x: u8 = 7;
-        let stowed = stow(x);
-        let unstowed = unsafe { unstow(stowed) };
-        assert_eq!(x, unstowed);
-    }
-
-    #[test]
-    fn test_uninitialized_stowaway_new() {
-        type Uninint = core::mem::MaybeUninit<usize>;
-
-        let _sto = super::Stowaway::new(Uninint::uninit());
-    }
-}
-
-impl<T> Drop for Stowaway<T> {
+impl<T: Stowable> Drop for Stowaway<T> {
     fn drop(&mut self) {
         // TODO: Deduplicate drop, into_inner, and as_ref
         match Self::size_class() {
@@ -391,7 +471,7 @@ impl<T> Drop for Stowaway<T> {
 
 #[cfg(test)]
 mod test_drop {
-    use crate::Stowaway;
+    use crate::{Stowable, Stowaway};
     use core::cell::Cell;
     use core::mem;
     use core::sync::atomic::{AtomicU32, Ordering};
@@ -406,6 +486,8 @@ mod test_drop {
         }
     }
 
+    unsafe impl<'a> Stowable for DropCounter<'a> {}
+
     #[test]
     fn zero_size_value() {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -418,6 +500,8 @@ mod test_drop {
                 COUNTER.fetch_add(1, Ordering::SeqCst);
             }
         }
+
+        unsafe impl Stowable for StaticDropCounter {}
 
         {
             let value = StaticDropCounter;
@@ -566,19 +650,19 @@ mod test_drop {
     }
 }
 
-impl<T: Default> Default for Stowaway<T> {
+impl<T: Default + Stowable> Default for Stowaway<T> {
     fn default() -> Self {
         Self::new(T::default())
     }
 }
 
-impl<T> From<T> for Stowaway<T> {
+impl<T: Stowable> From<T> for Stowaway<T> {
     fn from(value: T) -> Self {
         Self::new(value)
     }
 }
 
-impl<T> AsRef<T> for Stowaway<T> {
+impl<T: Stowable> AsRef<T> for Stowaway<T> {
     #[inline]
     fn as_ref(&self) -> &T {
         let ptr_to_storage = match Self::size_class() {
@@ -592,7 +676,7 @@ impl<T> AsRef<T> for Stowaway<T> {
     }
 }
 
-impl<T> AsMut<T> for Stowaway<T> {
+impl<T: Stowable> AsMut<T> for Stowaway<T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         let ptr_to_storage = match Self::size_class() {
@@ -606,7 +690,7 @@ impl<T> AsMut<T> for Stowaway<T> {
     }
 }
 
-impl<T> Deref for Stowaway<T> {
+impl<T: Stowable> Deref for Stowaway<T> {
     type Target = T;
 
     #[inline]
@@ -615,14 +699,14 @@ impl<T> Deref for Stowaway<T> {
     }
 }
 
-impl<T> DerefMut for Stowaway<T> {
+impl<T: Stowable> DerefMut for Stowaway<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut T {
         self.as_mut()
     }
 }
 
-impl<T: Clone> Clone for Stowaway<T> {
+impl<T: Clone + Stowable> Clone for Stowaway<T> {
     #[inline]
     fn clone(&self) -> Self {
         Self::new(self.as_ref().clone())
@@ -634,7 +718,7 @@ impl<T: Clone> Clone for Stowaway<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Stowaway<T> {
+impl<T: fmt::Debug + Stowable> fmt::Debug for Stowaway<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Stowaway")
             .field("inner", self.as_ref())
@@ -643,8 +727,8 @@ impl<T: fmt::Debug> fmt::Debug for Stowaway<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Stowaway<T> {}
-unsafe impl<T: Sync> Sync for Stowaway<T> {}
+unsafe impl<T: Send + Stowable> Send for Stowaway<T> {}
+unsafe impl<T: Sync + Stowable> Sync for Stowaway<T> {}
 
 /// Stow a value into a `*mut ()`. This function will store the value's bytes
 /// directly into the pointer if it will fit; otherwise it will box the value
@@ -653,7 +737,7 @@ unsafe impl<T: Sync> Sync for Stowaway<T> {}
 ///
 /// This is the equivalent of `Stowaway::into_raw(Stowaway::new(value))`
 #[inline]
-pub fn stow<T>(value: T) -> *mut () {
+pub fn stow<T: Stowable>(value: T) -> *mut () {
     Stowaway::into_raw(Stowaway::new(value))
 }
 
@@ -682,7 +766,7 @@ pub fn stow<T>(value: T) -> *mut () {
 /// - This function does not respect marker traits; you must take care not to
 /// pass a non-`Send` type to a different thread.
 #[inline]
-pub unsafe fn unstow<T>(storage: *mut ()) -> T {
+pub unsafe fn unstow<T: Stowable>(storage: *mut ()) -> T {
     Stowaway::into_inner(Stowaway::from_raw(storage))
 }
 
@@ -733,7 +817,7 @@ pub unsafe fn unstow<T>(storage: *mut ()) -> T {
 /// let value: i16 = unsafe { unstow(storage) };
 /// ```
 #[inline]
-pub unsafe fn ref_from_stowed<'a, T>(storage_ref: &'a *mut ()) -> &'a T {
+pub unsafe fn ref_from_stowed<'a, T: Stowable>(storage_ref: &'a *mut ()) -> &'a T {
     // Safety: because we use repr(transparent), this is a safe conversion
     let stowaway_ref: &'a Stowaway<T> = &*(storage_ref as *const *mut () as *const Stowaway<T>);
     stowaway_ref.as_ref()
@@ -782,6 +866,15 @@ fn test_ref_from_stowed_large() {
 /// to it, so you must take care to not separately take ownership of it
 /// somewhere else, or create any other shared or mutable references to it.
 ///
+/// # Mutability
+///
+/// Many C-like APIs will provide copies of the `void*` context pointer to
+/// their functions. While constructing mutable references with these copies is
+/// sound (as long as the mutable references never coexist), keep in mind that
+/// changes made may not be reflected unless the underlying API propagates
+/// them. In general you should use a `Box` rather than a `Stowaway` if you
+/// need mutability through a pointer like this.
+///
 /// # Safety
 ///
 /// This function has similar safety requirements as turning a mutable pointer
@@ -811,7 +904,7 @@ fn test_ref_from_stowed_large() {
 /// assert_eq!(&value, &[1, 2, 3, 4, 5, 6]);
 /// ```
 #[inline]
-pub unsafe fn mut_ref_from_stowed<'a, T>(storage_ref: &'a mut *mut ()) -> &'a mut T {
+pub unsafe fn mut_ref_from_stowed<'a, T: Stowable>(storage_ref: &'a mut *mut ()) -> &'a mut T {
     // Safety: because we use repr(transparent), this is a safe conversion
     let stowaway_ref: &'a mut Stowaway<T> = &mut *(storage_ref as *mut *mut () as *mut Stowaway<T>);
     stowaway_ref.as_mut()
@@ -849,4 +942,37 @@ fn test_mut_ref_from_stowed_large() {
     // drop stowed
     let value: Vec<i64> = unsafe { unstow(storage) };
     assert_eq!(&value, &[3245, 5675, 4653, 1234, 7345, 10, 12]);
+}
+// These tests are designed to detect undefined behavior in miri under naive,
+// incorrect implementations of Stowaway.
+#[cfg(test)]
+mod test_for_uninit_bytes {
+    use crate::{stow, unstow, Stowable};
+    #[test]
+    fn zst() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Zst;
+
+        unsafe impl Stowable for Zst {}
+
+        let x = Zst;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+
+    #[test]
+    fn small_t() {
+        let x: u8 = 7;
+        let stowed = stow(x);
+        let unstowed = unsafe { unstow(stowed) };
+        assert_eq!(x, unstowed);
+    }
+
+    #[test]
+    fn test_uninitialized_stowaway_new() {
+        type Uninint = core::mem::MaybeUninit<usize>;
+
+        let _sto = super::Stowaway::new(Uninint::uninit());
+    }
 }

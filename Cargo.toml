@@ -11,7 +11,12 @@ repository = "https://github.com/Lucretiel/stowaway"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rustversion = "1.0.2"
 
 [badges]
 travis-ci = { repository = "Lucretiel/joinery" }
 maintenance = { status = "actively-developed" }
+
+[features]
+default = ["std"]
+std = []

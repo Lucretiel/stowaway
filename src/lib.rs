@@ -179,7 +179,7 @@ use core::ptr::{self, NonNull};
 ///
 /// Structs which are `repr(transparent)` are `Stowable` if their inner field
 /// is `Stowable`.
-pub unsafe trait Stowable: Sized {}
+pub unsafe trait Stowable {}
 
 // TODO: determine when enums are safe to stow. For instance, is an
 // Option<usize> safe to stow? if the representation is IIIIIIII?UUUUUUU,
@@ -248,12 +248,12 @@ unsafe impl<T: Stowable> Stowable for Stowaway<T> {}
 // Pointers are obviously safe to stow. References are technically safe to
 // stow; the user must ensure that the lifetimes are correctly reconstructed
 // when calling from_raw.
-unsafe impl<T> Stowable for *const T {}
-unsafe impl<T> Stowable for *mut T {}
-unsafe impl<T> Stowable for &T {}
-unsafe impl<T> Stowable for Option<&mut T> {}
-unsafe impl<T> Stowable for Option<&T> {}
-unsafe impl<T> Stowable for &mut T {}
+unsafe impl<T: ?Sized> Stowable for *const T {}
+unsafe impl<T: ?Sized> Stowable for *mut T {}
+unsafe impl<T: ?Sized> Stowable for &T {}
+unsafe impl<T: ?Sized> Stowable for Option<&mut T> {}
+unsafe impl<T: ?Sized> Stowable for Option<&T> {}
+unsafe impl<T: ?Sized> Stowable for &mut T {}
 
 // Zero-size types are always fine
 unsafe impl Stowable for () {}

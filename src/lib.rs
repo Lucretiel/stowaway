@@ -386,7 +386,7 @@ impl<T: Stowable> Stowaway<T> {
     ///
     /// # Safety
     ///
-    /// This function has similar safety requirements as [`std::ptr::read`],
+    /// This function has similar safety requirements as [`std::ptr::read`][ptr::read],
     /// and [`Box::from_raw`] with the added caveat that the only valid way to
     /// create a `storage` pointer is with the [`stow`] or
     /// [`Stowaway::into_raw`] functions:
@@ -757,7 +757,7 @@ pub fn stow<T: Stowable>(value: T) -> *mut () {
 ///
 /// # Safety
 ///
-/// This function has similar safety requirements as [`std::ptr::read`]
+/// This function has similar safety requirements as  [`std::ptr::read`][ptr::read],
 /// and [`Box::from_raw`] with the added caveat that the only valid way to
 /// create a `storage` pointer is with the [`stow`] or [`Stowaway::into_raw`]
 /// functions:

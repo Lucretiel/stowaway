@@ -33,7 +33,7 @@
 //! ## Simple example:
 //!
 //! ```
-//! use stowaway::{Stowaway, Stowable };
+//! use stowaway::{Stowaway, Stowable};
 //!
 //! fn demo_lifecycle<T: Clone + std::fmt::Debug + Eq + Stowable>(value: T) {
 //!     let cloned = value.clone();
@@ -150,6 +150,15 @@ use core::mem::{self, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 
+#[cfg(feature = "derive")]
+#[allow(unused_imports)]
+#[macro_use]
+extern crate stowaway_derive;
+
+#[cfg(feature = "derive")]
+#[doc(hidden)]
+pub use stowaway_derive::Stowable;
+
 /// Marker trait to indicate which types are safe to stow.
 ///
 /// Currently, it is undefined behavior to read/write uninitialized memory
@@ -179,6 +188,43 @@ use core::ptr::{self, NonNull};
 ///
 /// Structs which are `repr(transparent)` are `Stowable` if their inner field
 /// is `Stowable`.
+///
+/// This trait can be safely derived for any struct with 0 or 1 field:
+///
+/// ```
+/// use stowaway::Stowable;
+/// use std::sync::Arc;
+///
+/// #[derive(Debug, Clone, Stowable)]
+/// struct ItemHandle<T> {
+///     ptr: Arc<T>
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use stowaway::Stowable;
+///
+/// // This will not work; TwoFields has two fields
+/// #[derive(Stowable)]
+/// struct TwoFields {
+///     a: usize,
+///     b: usize,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use stowaway::Stowable;
+///
+/// // This will not work; the inner field isn't stowable
+/// struct NotStowable {
+///     ptr: Arc<usize>,
+/// }
+///
+/// #[derive(Stowable)]
+/// struct Handle {
+///     ptr: NotStowable,
+/// }
+/// ```
 pub unsafe trait Stowable {}
 
 // TODO: determine when enums are safe to stow. For instance, is an

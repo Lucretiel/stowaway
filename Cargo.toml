@@ -15,7 +15,6 @@ rustversion = "1.0.2"
 stowaway-derive = { version = "0.1.0", optional = true }
 
 [features]
-default = [ "derive" ]
 derive = ["stowaway-derive"]
 
 [badges]
